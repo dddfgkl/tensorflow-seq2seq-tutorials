@@ -6,7 +6,8 @@ import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.seq2seq as seq2seq
 from tensorflow.contrib.layers import safe_embedding_lookup_sparse as embedding_lookup_unique
-from tensorflow.contrib.rnn import LSTMCell, LSTMStateTuple, GRUCell
+from tensorflow.contrib.rnn import BasicLSTMCell, LSTMCell, LSTMStateTuple, GRUCell
+from tensorflow.python.layers import core as layers_core
 
 import helpers
 
@@ -150,6 +151,9 @@ class Seq2SeqModel():
                 self.embedding_matrix, self.decoder_train_inputs)
 
     def _init_simple_encoder(self):
+        #TODO debug
+        print("### using simple encoder")
+
         with tf.variable_scope("Encoder") as scope:
             (self.encoder_outputs, self.encoder_state) = (
                 tf.nn.dynamic_rnn(cell=self.encoder_cell,
@@ -160,6 +164,8 @@ class Seq2SeqModel():
                 )
 
     def _init_bidirectional_encoder(self):
+        #TODO
+        print("#usnig bidrectional encoder")
         with tf.variable_scope("BidirectionalEncoder") as scope:
 
             ((encoder_fw_outputs,
@@ -189,53 +195,64 @@ class Seq2SeqModel():
 
     def _init_decoder(self):
         with tf.variable_scope("Decoder") as scope:
-            def output_fn(outputs):
-                return tf.contrib.layers.linear(outputs, self.vocab_size, scope=scope)
+
+            output_layer = layers_core.Dense(
+                                 self.vocab_size, use_bias=False, name="output_projection")
+
+            sequence_size, batch_size = tf.unstack(tf.shape(self.encoder_inputs))
+            EOS_SLICE = tf.ones(batch_size, dtype=tf.int32) * self.EOS
 
             train_helper = tf.contrib.seq2seq.TrainingHelper(
-                input = self.decoder_train_inputs_embedded,
+                inputs = self.decoder_train_inputs_embedded,
                 sequence_length = self.decoder_train_length)
-            infer_helper = tf.contrib.seq2seq.GreedyEmbdeddingHelper(
+
+            infer_helper = tf.contrib.seq2seq.GreedyEmbeddingHelper(
                 embedding = self.embedding_matrix,
-                start_tokens = self.EOS_SLICE,
+                start_tokens = EOS_SLICE,
                 end_token = self.EOS
                 )
 
+            cell = self.decoder_cell
             if self.attention:
-                attention_mechanisem = tf.contrib.seq2seq.LuongAttention(10, self.encoder_outputs)
-                cell = tf.contrib.seq2seq.AttensionWrapper(
-                    cell, attention_mechanisem, attension_size = 10
+                memory = tf.transpose(self.encoder_outputs, [1, 0, 2])
+                attention_mechanisem = tf.contrib.seq2seq.LuongAttention(10, memory)
+                cell = tf.contrib.seq2seq.AttentionWrapper(
+                    cell, attention_mechanisem 
                     )
+
+            decoder_initial_state = cell.zero_state(batch_size, tf.float32).clone(
+                              cell_state=self.encoder_state)
             train_decoder = tf.contrib.seq2seq.BasicDecoder(
                 cell = cell,
                 helper = train_helper,
-                initial_state = self.encoder_state
+                initial_state = decoder_initial_state
                 )
 
             infer_decoder = tf.contrib.seq2seq.BasicDecoder(
                 cell = cell,
                 helper = infer_helper,
-                initial_state = self.encoder_state
+                initial_state = decoder_initial_state
                 )
 
 
             (self.decoder_outputs_train,
              self.decoder_state_train,
              _ ) =  tf.contrib.seq2seq.dynamic_decode(
-                            decoder = self.train_decoder
+                            decoder = train_decoder
                 )
 
-            self.decoder_logits_train = output_fn(self.decoder_outputs_train)
+            self.decoder_logits_train = output_layer(self.decoder_outputs_train.rnn_output)
             self.decoder_prediction_train = tf.argmax(self.decoder_logits_train, axis=-1, name='decoder_prediction_train')
 
 
-            (self.decoder_logits_inference,
+            (self.decoder_outputs_inference,
              self.decoder_state_inference,
              _) = (
-                seq2seq.dynamic_decode(
-                    decoder = self.infer_decoder
+                tf.contrib.seq2seq.dynamic_decode(
+                    decoder = infer_decoder
                 )
             )
+            self.decoder_logits_inference = output_layer(self.decoder_outputs_inference.rnn_output)
             self.decoder_prediction_inference = tf.argmax(self.decoder_logits_inference, axis=-1, name='decoder_prediction_inference')
 
     def _init_optimizer(self):
@@ -264,12 +281,12 @@ class Seq2SeqModel():
 
 
 def make_seq2seq_model(**kwargs):
-    args = dict(encoder_cell=LSTMCell(10),
-                decoder_cell=LSTMCell(20),
+    args = dict(encoder_cell=BasicLSTMCell(10),
+                decoder_cell=BasicLSTMCell(10),
                 vocab_size=10,
                 embedding_size=10,
                 attention=True,
-                bidirectional=True,
+                bidirectional=False,
                 debug=False)
     args.update(kwargs)
     return Seq2SeqModel(**args)
@@ -362,5 +379,8 @@ if __name__ == '__main__':
         session.run(tf.global_variables_initializer())
 
         fd = model.make_inference_inputs([[5, 4, 6, 7], [6, 6]])
+        #encoder_outputs = session.run(model.encoder_outputs, fd)
+        #print(encoder_outputs.shape)
 
         inf_out = session.run(model.decoder_prediction_inference, fd)
+        print(inf_out)
